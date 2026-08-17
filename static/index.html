@@ -55,7 +55,6 @@
 
 
     <script>
-
         const video = document.getElementById("video");
         const overlay = document.getElementById("overlay");
         const ctx = overlay.getContext("2d");
@@ -74,17 +73,17 @@
 
             if (running) return;
 
-            // Check if browser supports camera API
             if (!navigator.mediaDevices ||
                 !navigator.mediaDevices.getUserMedia) {
 
                 status.innerText =
-                    "Camera API unavailable. Mobile camera requires HTTPS.";
+                    "Camera API unavailable. HTTPS is required.";
 
                 return;
             }
 
             try {
+                status.innerText = "Requesting camera...";
 
                 stream = await navigator.mediaDevices.getUserMedia({
                     video: {
@@ -95,24 +94,21 @@
 
                 video.srcObject = stream;
 
-                video.onloadedmetadata = () => {
+                await video.play();
 
-                    running = true;
+                running = true;
 
-                    overlay.width = video.videoWidth;
-                    overlay.height = video.videoHeight;
+                overlay.width = video.videoWidth;
+                overlay.height = video.videoHeight;
 
-                    overlay.style.width =
-                        video.clientWidth + "px";
+                overlay.style.width = video.clientWidth + "px";
+                overlay.style.height = video.clientHeight + "px";
 
-                    overlay.style.height =
-                        video.clientHeight + "px";
+                console.log("Camera started:", video.videoWidth, video.videoHeight);
 
-                    status.innerText =
-                        "Camera running - detection active";
+                status.innerText = "Camera started. Connecting to YOLO...";
 
-                    detectionLoop();
-                };
+                detectionLoop();
 
             } catch (error) {
 
@@ -120,8 +116,7 @@
 
                 status.innerText =
                     "Camera error: " +
-                    error.name +
-                    " - " +
+                    error.name + " - " +
                     error.message;
             }
         }
@@ -131,110 +126,108 @@
 
             while (running) {
 
-                if (!processing && video.videoWidth > 0) {
+                if (processing || video.readyState < 2 || video.videoWidth === 0) {
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                    continue;
+                }
 
-                    processing = true;
+                processing = true;
 
-                    // Capture at original resolution
-                    captureCanvas.width = video.videoWidth;
-                    captureCanvas.height = video.videoHeight;
+                try {
+                    // Use smaller frame for faster upload/inference
+                    const width = 640;
+                    const height = Math.round(
+                        video.videoHeight * (width / video.videoWidth)
+                    );
+
+                    captureCanvas.width = width;
+                    captureCanvas.height = height;
 
                     captureCtx.drawImage(
                         video,
                         0,
                         0,
-                        captureCanvas.width,
-                        captureCanvas.height
+                        width,
+                        height
                     );
 
-
-                    await new Promise(resolve => {
-
+                    const blob = await new Promise(resolve =>
                         captureCanvas.toBlob(
-                            async blob => {
-
-                                try {
-
-                                    const formData =
-                                        new FormData();
-
-                                    formData.append(
-                                        "frame",
-                                        blob,
-                                        "frame.jpg"
-                                    );
-
-
-                                    const response =
-                                        await fetch(
-                                            "/detect",
-                                            {
-                                                method: "POST",
-                                                body: formData
-                                            }
-                                        );
-
-
-                                    const data =
-                                        await response.json();
-
-
-                                    if (data.error) {
-
-                                        console.error(
-                                            data.error
-                                        );
-
-                                    } else {
-
-                                        drawBoxes(data);
-                                    }
-
-
-                                } catch (error) {
-
-                                    console.error(
-                                        error
-                                    );
-
-                                } finally {
-
-                                    processing = false;
-
-                                    resolve();
-                                }
-
-                            },
+                            resolve,
                             "image/jpeg",
                             0.8
-                        );
+                        )
+                    );
 
+                    if (!blob) {
+                        throw new Error("Could not create image");
+                    }
+
+                    console.log("Sending frame to /detect...", blob.size);
+
+                    status.innerText = "Sending frame to YOLO...";
+
+                    const formData = new FormData();
+                    formData.append("frame", blob, "frame.jpg");
+
+                    const response = await fetch("/detect", {
+                        method: "POST",
+                        body: formData
                     });
+
+                    console.log(
+                        "Response:",
+                        response.status
+                    );
+
+                    if (!response.ok) {
+                        const text = await response.text();
+                        throw new Error(
+                            "Server error " +
+                            response.status +
+                            ": " +
+                            text
+                        );
+                    }
+
+                    const data = await response.json();
+
+                    console.log("YOLO RESULT:", data);
+
+                    drawBoxes(data);
+
+                } catch (error) {
+
+                    console.error("Detection error:", error);
+
+                    status.innerText =
+                        "Detection error: " + error.message;
+
+                } finally {
+                    processing = false;
                 }
 
-                // Start next detection after current finishes
-                await new Promise(
-                    resolve => setTimeout(resolve, 100)
-                );
+                // Important: don't overload the Render CPU
+                await new Promise(resolve => setTimeout(resolve, 500));
             }
         }
 
 
         function drawBoxes(data) {
 
-            // Make sure canvas matches real YOLO frame
+            if (!data.detections) {
+                console.error("Invalid response:", data);
+                return;
+            }
+
+            // Canvas coordinate system = detection image
             overlay.width = data.frame_width;
             overlay.height = data.frame_height;
 
-            // Match visual size to video
-            overlay.style.width =
-                video.clientWidth + "px";
+            // Visually overlay the video
+            overlay.style.width = video.clientWidth + "px";
+            overlay.style.height = video.clientHeight + "px";
 
-            overlay.style.height =
-                video.clientHeight + "px";
-
-
-            // Clear previous frame
             ctx.clearRect(
                 0,
                 0,
@@ -242,10 +235,8 @@
                 overlay.height
             );
 
-
             data.detections.forEach(det => {
 
-                // Draw bounding box
                 ctx.strokeStyle = "#00ff00";
                 ctx.lineWidth = 4;
 
@@ -256,23 +247,14 @@
                     det.y2 - det.y1
                 );
 
-
-                // Label
                 const label =
-                    det.label + " " +
-                    (det.confidence * 100).toFixed(0) +
-                    "%";
+                    `${det.label} ${(det.confidence * 100).toFixed(0)}%`;
 
                 ctx.font = "20px Arial";
 
-                const textWidth =
-                    ctx.measureText(label).width;
+                const textWidth = ctx.measureText(label).width;
+                const textY = Math.max(0, det.y1 - 30);
 
-                const textY =
-                    Math.max(0, det.y1 - 30);
-
-
-                // Label background
                 ctx.fillStyle = "#00ff00";
 
                 ctx.fillRect(
@@ -282,8 +264,6 @@
                     30
                 );
 
-
-                // Label text
                 ctx.fillStyle = "black";
 
                 ctx.fillText(
@@ -303,11 +283,7 @@
             running = false;
 
             if (stream) {
-
-                stream.getTracks().forEach(track => {
-                    track.stop();
-                });
-
+                stream.getTracks().forEach(track => track.stop());
                 stream = null;
             }
 
@@ -322,7 +298,6 @@
 
             status.innerText = "Camera stopped";
         }
-
     </script>
 
 </body>
