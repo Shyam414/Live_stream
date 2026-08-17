@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live YOLO Detection</title>
+
+    <style>
+        body {
+            background: #111;
+            color: white;
+            font-family: Arial;
+            text-align: center;
+        }
+
+        #container {
+            position: relative;
+            display: inline-block;
+            margin-top: 20px;
+        }
+
+        #video {
+            display: block;
+            width: 640px;
+            max-width: 90vw;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Live YOLO Detection</h1>
+
+    <button onclick="startCamera()">Start Camera</button>
+    <button onclick="stopCamera()">Stop Camera</button>
+
+    <br>
+
+    <div id="container">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="overlay"></canvas>
+    </div>
+
+    <h3 id="status">Camera stopped</h3>
+
+
+    <script>
+
+        const video = document.getElementById("video");
+        const overlay = document.getElementById("overlay");
+        const ctx = overlay.getContext("2d");
+
+        const captureCanvas = document.createElement("canvas");
+        const captureCtx = captureCanvas.getContext("2d");
+
+        const status = document.getElementById("status");
+
+        let stream = null;
+        let running = false;
+        let processing = false;
+
+
+        async function startCamera() {
+
+            if (running) return;
+
+            // Check if browser supports camera API
+            if (!navigator.mediaDevices ||
+                !navigator.mediaDevices.getUserMedia) {
+
+                status.innerText =
+                    "Camera API unavailable. Mobile camera requires HTTPS.";
+
+                return;
+            }
+
+            try {
+
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: "environment"
+                    },
+                    audio: false
+                });
+
+                video.srcObject = stream;
+
+                video.onloadedmetadata = () => {
+
+                    running = true;
+
+                    overlay.width = video.videoWidth;
+                    overlay.height = video.videoHeight;
+
+                    overlay.style.width =
+                        video.clientWidth + "px";
+
+                    overlay.style.height =
+                        video.clientHeight + "px";
+
+                    status.innerText =
+                        "Camera running - detection active";
+
+                    detectionLoop();
+                };
+
+            } catch (error) {
+
+                console.error("Camera error:", error);
+
+                status.innerText =
+                    "Camera error: " +
+                    error.name +
+                    " - " +
+                    error.message;
+            }
+        }
+
+
+        async function detectionLoop() {
+
+            while (running) {
+
+                if (!processing && video.videoWidth > 0) {
+
+                    processing = true;
+
+                    // Capture at original resolution
+                    captureCanvas.width = video.videoWidth;
+                    captureCanvas.height = video.videoHeight;
+
+                    captureCtx.drawImage(
+                        video,
+                        0,
+                        0,
+                        captureCanvas.width,
+                        captureCanvas.height
+                    );
+
+
+                    await new Promise(resolve => {
+
+                        captureCanvas.toBlob(
+                            async blob => {
+
+                                try {
+
+                                    const formData =
+                                        new FormData();
+
+                                    formData.append(
+                                        "frame",
+                                        blob,
+                                        "frame.jpg"
+                                    );
+
+
+                                    const response =
+                                        await fetch(
+                                            "/detect",
+                                            {
+                                                method: "POST",
+                                                body: formData
+                                            }
+                                        );
+
+
+                                    const data =
+                                        await response.json();
+
+
+                                    if (data.error) {
+
+                                        console.error(
+                                            data.error
+                                        );
+
+                                    } else {
+
+                                        drawBoxes(data);
+                                    }
+
+
+                                } catch (error) {
+
+                                    console.error(
+                                        error
+                                    );
+
+                                } finally {
+
+                                    processing = false;
+
+                                    resolve();
+                                }
+
+                            },
+                            "image/jpeg",
+                            0.8
+                        );
+
+                    });
+                }
+
+                // Start next detection after current finishes
+                await new Promise(
+                    resolve => setTimeout(resolve, 100)
+                );
+            }
+        }
+
+
+        function drawBoxes(data) {
+
+            // Make sure canvas matches real YOLO frame
+            overlay.width = data.frame_width;
+            overlay.height = data.frame_height;
+
+            // Match visual size to video
+            overlay.style.width =
+                video.clientWidth + "px";
+
+            overlay.style.height =
+                video.clientHeight + "px";
+
+
+            // Clear previous frame
+            ctx.clearRect(
+                0,
+                0,
+                overlay.width,
+                overlay.height
+            );
+
+
+            data.detections.forEach(det => {
+
+                // Draw bounding box
+                ctx.strokeStyle = "#00ff00";
+                ctx.lineWidth = 4;
+
+                ctx.strokeRect(
+                    det.x1,
+                    det.y1,
+                    det.x2 - det.x1,
+                    det.y2 - det.y1
+                );
+
+
+                // Label
+                const label =
+                    det.label + " " +
+                    (det.confidence * 100).toFixed(0) +
+                    "%";
+
+                ctx.font = "20px Arial";
+
+                const textWidth =
+                    ctx.measureText(label).width;
+
+                const textY =
+                    Math.max(0, det.y1 - 30);
+
+
+                // Label background
+                ctx.fillStyle = "#00ff00";
+
+                ctx.fillRect(
+                    det.x1,
+                    textY,
+                    textWidth + 10,
+                    30
+                );
+
+
+                // Label text
+                ctx.fillStyle = "black";
+
+                ctx.fillText(
+                    label,
+                    det.x1 + 5,
+                    textY + 22
+                );
+            });
+
+            status.innerText =
+                `Detected: ${data.detections.length} object(s)`;
+        }
+
+
+        function stopCamera() {
+
+            running = false;
+
+            if (stream) {
+
+                stream.getTracks().forEach(track => {
+                    track.stop();
+                });
+
+                stream = null;
+            }
+
+            video.srcObject = null;
+
+            ctx.clearRect(
+                0,
+                0,
+                overlay.width,
+                overlay.height
+            );
+
+            status.innerText = "Camera stopped";
+        }
+
+    </script>
+
+</body>
+</html>
